@@ -1,4 +1,4 @@
-使用Taichi 实现了一个基础的三维烟雾模拟器，基本是按照第四课的内容，包括了Advection 和 Projection。
+使用[Taichi](https://github.com/yuanming-hu/taichi) 实现了一个基础的三维烟雾模拟器，基本是按照第四课的内容，包括了Advection 和 Projection。
 
 * Advection
    代码中的advection 有Semi-Lagrangian 和 BFECC，但是BFECC的Clipping部分作用于向量时会出错，目前还未解决，所以我对速度场使用了Semi-Lagrangian方法，对density场使用了BFECC。

@@ -34,11 +34,13 @@ class SmokeSolver:
         self.half_inv_dx = 0.5 * self.inv_dx
         self.p_alpha = -self.dx * self.dx
         self.use_bfecc = True
+        self.use_reflect = True
         self.solver_type = SolverType.jacobi
         self.max_iter = 60
 
         self._velocities = ti.Vector(3, dt=ti.f32, shape=self.res)
         self._new_velocities = ti.Vector(3, dt=ti.f32, shape=self.res)
+        self._vel_temp = ti.Vector(3, dt=ti.f32, shape=self.res)
         self.velocity_divs = ti.var(dt=ti.f32, shape=self.res)
         self._pressures = ti.var(dt=ti.f32, shape=self.res)
         self._new_pressures = ti.var(dt=ti.f32, shape=self.res)
@@ -119,6 +121,16 @@ class SmokeSolver:
         return self.lerp(bilerp1, bilerp2, fw)
 
     @ti.func
+    def mult_const(self, qf: ti.template(), vec3):
+        for i, j, k in qf:
+            qf[i, j, k] *= vec3
+
+    @ti.func
+    def add_scaled(self, qf: ti.template(), bf: ti.template(), vec3):
+        for i, j, k in qf:
+            qf[i, j, k] += bf[i, j, k] * vec3
+
+    @ti.func
     def sample_min(self, qf: ti.template(), coord):
         grid = coord * self.inv_dx - ti.Vector([0.5, 0.5, 0.5])
         I = ti.cast(ti.floor(grid), ti.i32)
@@ -150,20 +162,40 @@ class SmokeSolver:
             new_qf[i, j, k] = self.trilerp(qf, coord[0], coord[1], coord[2])
 
     @ti.kernel
-    def advect_bfecc(self, vf: ti.template(), qf: ti.template(), new_qf: ti.template()):
+    def advect_bfecc_scalar(self, vf: ti.template(), qf: ti.template(), new_qf: ti.template(), dt: ti.f32):
         for I in ti.grouped(vf):
             pos = ti.Vector([I[0], I[1], I[2]]) + 0.5 * self.dx
-            coord = self.back_trace_rk2(vf, pos, self.dt)
+            coord = self.back_trace_rk2(vf, pos, dt)
             x1 = self.trilerp(qf, coord[0], coord[1], coord[2])
-            coord2 = self.back_trace_rk2(vf, coord, -self.dt)
+            coord2 = self.back_trace_rk2(vf, coord, -dt)
             x2 = self.trilerp(qf, coord2[0], coord2[1], coord[2])
             new_qf[I] = x1 + 0.5 * (x2 - qf[I])
 
-            # clipping ????????
+            # clipping
             min_val = self.sample_min(qf, coord)
             max_val = self.sample_max(qf, coord)
             if new_qf[I] < min_val or new_qf[I] > max_val:
                 new_qf[I] = x1
+
+    @ti.kernel
+    def advect_bfecc_vec3(self, vf: ti.template(), qf: ti.template(), new_qf: ti.template(), dt: ti.f32):
+        for I in ti.grouped(vf):
+            pos = ti.Vector([I[0], I[1], I[2]]) + 0.5 * self.dx
+            coord = self.back_trace_rk2(vf, pos, dt)
+            x1 = self.trilerp(qf, coord[0], coord[1], coord[2])
+            coord2 = self.back_trace_rk2(vf, coord, -dt)
+            x2 = self.trilerp(qf, coord2[0], coord2[1], coord[2])
+            new_qf[I] = x1 + 0.5 * (x2 - qf[I])
+
+            # clipping
+            min_val = self.sample_min(qf, coord)
+            max_val = self.sample_max(qf, coord)
+            if new_qf[I][0] < min_val[0] or new_qf[I][0] > max_val[0]:
+                new_qf[I][0] = x1[0]
+            if new_qf[I][1] < min_val[1] or new_qf[I][1] > max_val[1]:
+                new_qf[I][1] = x1[1]
+            if new_qf[I][2] < min_val[2] or new_qf[I][2] > max_val[2]:
+                new_qf[I][2] = x1[2]
 
     @ti.kernel
     def divergence(self, vf: ti.template()):
@@ -236,6 +268,16 @@ class SmokeSolver:
             v = self.sample(vf, i, j, k)
             v = v - self.half_inv_dx * ti.Vector([pr - pl, pt - pb, pq - ph])
             vf[i, j, k] = v
+
+    @ti.kernel
+    def my_copy_from(self, af: ti.template(), bf: ti.template()):
+        for i, j, k in af:
+            af[i, j, k] = bf[i, j, k]
+
+    @ti.kernel
+    def reflect(self, af: ti.template(), vdf: ti.template()):
+        self.mult_const(af, ti.Vector([-1, -1, -1]))
+        self.add_scaled(af, vdf, ti.Vector([2, 2, 2]))
 
     # <editor-fold desc="MGPCG">
 
@@ -422,8 +464,10 @@ class SmokeSolver:
 
     def step(self):
         if self.use_bfecc:
-            self.advect_semi_l(self.velocities_pair.cur, self.velocities_pair.cur, self.velocities_pair.nxt)
-            self.advect_bfecc(self.velocities_pair.cur, self.dens_pair.cur, self.dens_pair.nxt)
+            self.advect_bfecc_vec3(self.velocities_pair.cur, self.velocities_pair.cur,
+                                   self.velocities_pair.nxt, self.dt)
+            self.advect_bfecc_scalar(self.velocities_pair.cur, self.dens_pair.cur,
+                                     self.dens_pair.nxt, self.dt)
         else:
             self.advect_semi_l(self.velocities_pair.cur, self.velocities_pair.cur, self.velocities_pair.nxt)
             self.advect_semi_l(self.velocities_pair.cur, self.dens_pair.cur, self.dens_pair.nxt)
@@ -445,6 +489,33 @@ class SmokeSolver:
             self.mgpcg_run()
             self.pressures_pair.cur.copy_from(self.x)
             self.subtract_gradient(self.velocities_pair.cur, self.pressures_pair.cur)
+
+    def step_reflect(self):
+        self.advect_bfecc_vec3(self.velocities_pair.cur, self.velocities_pair.cur,
+                               self.velocities_pair.nxt, self.dt * 0.5)
+        self.advect_bfecc_scalar(self.velocities_pair.cur, self.dens_pair.cur,
+                                 self.dens_pair.nxt, self.dt * 0.5)
+        self.my_copy_from(self._vel_temp, self.velocities_pair.nxt)
+        self.divergence(self.velocities_pair.nxt)
+        for _ in range(self.max_iter):
+            self.Gauss_Seidel(self.pressures_pair.cur, self.pressures_pair.nxt)
+            self.pressures_pair.swap()
+        self.subtract_gradient(self._vel_temp, self.pressures_pair.cur)
+        self.reflect(self.velocities_pair.nxt, self._vel_temp)
+        self.velocities_pair.swap()
+        self.dens_pair.swap()
+
+        self.advect_bfecc_vec3(self._vel_temp, self.velocities_pair.cur,
+                               self.velocities_pair.nxt, self.dt * 0.5)
+        self.advect_bfecc_scalar(self._vel_temp, self.dens_pair.cur,
+                                 self.dens_pair.nxt, self.dt * 0.5)
+        self.velocities_pair.swap()
+        self.dens_pair.swap()
+        self.divergence(self.velocities_pair.cur)
+        for _ in range(self.max_iter):
+            self.Gauss_Seidel(self.pressures_pair.cur, self.pressures_pair.nxt)
+            self.pressures_pair.swap()
+        self.subtract_gradient(self.velocities_pair.cur, self.pressures_pair.cur)
 
     def reset(self):
         self._dens_buffer.fill(0.0)
@@ -477,7 +548,10 @@ class SmokeSolver:
             for e in gui.get_events(ti.GUI.PRESS):
                 if e.key in [ti.GUI.ESCAPE, ti.GUI.EXIT]:
                     exit()
-            self.step()
+            if self.use_reflect:
+                self.step_reflect()
+            else:
+                self.step()
             self.source()
             self.to_image()
             gui.set_image(self._img)
@@ -485,9 +559,9 @@ class SmokeSolver:
             fps = 1/delta_t
             timer = time.time()
             gui.text(content=f'fps: {fps:.1f}', pos=(0, 0.98), color=0xffaa77)
-            filename = f'mgpcg_{self.max_iter:02d}iter_{count:05d}.png'
+            filename = f'advection_reflect_{self.max_iter:02d}iter_{count:05d}.png'
             gui.show()
-            self.save_ply(count)
+            # self.save_ply(count)
             count += 1
 
 

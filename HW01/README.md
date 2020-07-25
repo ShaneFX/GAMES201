@@ -1,7 +1,8 @@
 使用[Taichi](https://github.com/yuanming-hu/taichi) 实现了一个基础的三维烟雾模拟器，基本是按照第四课的内容，包括了Advection 和 Projection。
 
 * Advection
-   代码中的advection 有Semi-Lagrangian 和 BFECC，但是BFECC的Clipping部分作用于向量时会出错，目前还未解决，所以我对速度场使用了Semi-Lagrangian方法，对density场使用了BFECC。
+   代码中的advection 有Semi-Lagrangian 和 BFECC，Advection_Reflection 也已经完成。
+   <img width="500px" src="https://github.com/ShaneFX/GAMES201/blob/master/HW01/images/04.jpg">
 
 * Projection
   Projection部分主要参考了案例 stable_fluid.py， mgpcg.py和mgpcg_advanced.py。
@@ -16,3 +17,5 @@
 
 * 其它
   我使用的dt 为0.04， 测试中发现大于0.07左右就会有Artifact 产生，当然这与初始发射源和速度的设置是有关系的。
+  
+  [视频地址(B站)：](https://www.bilibili.com/video/BV1cK4y1x782/)

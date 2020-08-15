@@ -1,3 +1,0 @@
-Dependencies:
-taichi
-plyfile
